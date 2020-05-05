@@ -41,13 +41,11 @@ uint16_t pos;
 
 Servo servo1;
 MFRC522 mfrc522(SS_PIN, RST_PIN);  // Create MFRC522 instance
-MFRC522::MIFARE_Key key;
 
 int ledState = LOW;             // ledState used to set the LED
 
 int duration = 2000;
 
-byte readbackblock[18];
 int block=2;
 
 EasyButton button(BUTTON_PIN);
@@ -71,6 +69,7 @@ void buzzer(uint16_t t_on, uint16_t t_off, uint8_t count){
 }
 
 void servo_open(){
+  LED_ON(LED0);
   servo1.write(POS_UP);
   delay(100);
 }
@@ -78,6 +77,7 @@ void servo_open(){
 void servo_close(){
   servo1.write(POS_DOWN);
   delay(100);
+  LED_OFF(LED0);
 }
 
 String read_rfid(){
@@ -141,7 +141,7 @@ void reconnect() {
     if (client.connect("barrierclient")) {
       Serial.println("connected");
       // Subscribe
-      client.subscribe("esp32/output");
+      client.subscribe(subscribeTopic);
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
@@ -159,20 +159,18 @@ void mqttCallback(char* topic, byte* payload, unsigned int len){
   String payload_s = (char*)payload;
   payload_s = payload_s.substring(0,len);
 
+  Serial.println("receive message");
+
   if(subtopic == GATE_ID){
     if(payload_s == "open"){
       Serial.println("gate open");
-      digitalWrite(LED_BUILTIN,HIGH);
-      servo1.write(90);
-      delay(2000);
-      client.publish(topicOut,"1");
+      servo_open();
+      delay(5000);
+      servo_close();
     }
    if(payload_s=="close"){
       Serial.println("gate close");
-      digitalWrite(LED_BUILTIN,LOW);
-      servo1.write(0);
-      delay(2000);
-      client.publish(topicOut,"0");
+      servo_close();
     }
   }
 }
@@ -180,13 +178,16 @@ void mqttCallback(char* topic, byte* payload, unsigned int len){
 int readBlock(int blockNumber, byte arrayAddress[]){
   int largestModulo4Number=blockNumber/4*4;
   int trailerBlock=largestModulo4Number+3;//determine trailer block for the sector
-
+  
+  MFRC522::MIFARE_Key key;
+  for (byte i = 0; i < 6; i++) key.keyByte[i] = 0xFF;
+  
+  MFRC522::StatusCode status;
   //authentication of the desired block for access
-  byte status = (MFRC522::StatusCode)mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
-
+  status = (MFRC522::StatusCode)mfrc522.PCD_Authenticate(MFRC522::PICC_CMD_MF_AUTH_KEY_A, trailerBlock, &key, &(mfrc522.uid));
   if (status != MFRC522::STATUS_OK) {
          Serial.print("PCD_Authenticate() failed (read): ");
-         //Serial.println(mfrc522.GetStatusCodeName(status));
+         Serial.println(mfrc522.GetStatusCodeName(status));
          return 3;//return "3" as error message
   }
 
@@ -195,7 +196,7 @@ byte buffersize = 18;//we need to define a variable with the read buffer size, s
 status = (MFRC522::StatusCode)mfrc522.MIFARE_Read(blockNumber, arrayAddress, &buffersize);//&buffersize is a pointer to the buffersize variable; MIFARE_Read requires a pointer instead of just a number
   if (status != MFRC522::STATUS_OK) {
           Serial.print("MIFARE_read() failed: ");
-          //Serial.println(mfrc522.GetStatusCodeName(status));
+          Serial.println(mfrc522.GetStatusCodeName(status));
           return 4;//return "4" as error message
   }
   Serial.println("block was read");
@@ -214,14 +215,9 @@ void setup() {
   
   SPI.begin();			// Init SPI bus
   mfrc522.PCD_Init();		// Init MFRC522
-  delay(4);				// Optional delay. Some board do need more time after init to be ready, see Readme
+  delay(100);				// Optional delay. Some board do need more time after init to be ready, see Readme
   mfrc522.PCD_DumpVersionToSerial();	// Show details of PCD - MFRC522 Card Reader details
   Serial.println(F("Scan PICC to see UID, SAK, type, and data blocks..."));
-
-  // Prepare the security key for the read and write functions.
-  for (byte i = 0; i < 6; i++) {
-    key.keyByte[i] = 0xFF;  //keyByte is defined in the "MIFARE_Key" 'struct' definition in the .h file of the library
-  }
   
   servo1.attach(servoPin);
   button.begin();
@@ -237,8 +233,13 @@ void loop() {
   unsigned long currentMillis = millis();
   if (currentMillis - previousMillis >= interval)
   {
-    previousMillis = currentMillis;    
+    previousMillis = currentMillis; 
+    
+    byte readbackblock[18];
+       
     String rfid = read_rfid();
+    mfrc522.PCD_StopCrypto1();
+    
     if(rfid.length())
     {
       Serial.println("rfid_tag: " + rfid);
@@ -252,7 +253,6 @@ void loop() {
       Serial.println(key_access);
       Serial.println("");
       mfrc522.PICC_HaltA();
-      mfrc522.PCD_StopCrypto1();
       delay(1000);
       if(key_access == MASTER_ACCESS){
         Serial.println("Access granted!");
