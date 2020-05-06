@@ -1,9 +1,20 @@
 #include <WiFi.h>
 #include <SPI.h>
 #include <MFRC522.h>
-#include <EasyButton.h>
 #include <Servo.h>
 #include <PubSubClient.h>
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEScan.h>
+#include <BLEAdvertisedDevice.h>
+
+#define PROXIMITY      1.5 //in meter
+#define FILTER_ID      "cb"
+#define NUMBEROFBEACON 100
+#define DETECT_COUNTER 3
+#define UPDATE_MILLIS  500
+#define BLE_TIMEOUT    5000
 
 #define GATE_ID "/gate1"
 #define MASTER_ACCESS "eyrodigitallabs"
@@ -11,12 +22,11 @@
 #define POS_UP 90
 #define POS_DOWN 0
 
-
 // Arduino pin number where the button is connected.
 #define BUTTON_PIN 4
 #define RST_PIN    15          // Configurable, see typical pin layout above
 #define SS_PIN     21         // Configurable, see typical pin layout above
-#define LED0       LED_BUILTIN
+#define LED0       2
 #define LED1       5
 #define BUZZER     22   
 #define MASTER_CARD     "EB693E5B"
@@ -27,8 +37,12 @@
 #define  BUZZER_ON()   digitalWrite(BUZZER, HIGH)
 #define  BUZZER_OFF()  digitalWrite(BUZZER, LOW)
 
-const char* ssid = "hayo kere ya";
-const char* password = "debbycantikbanget";
+int scanTime = 1; //In seconds
+unsigned long current_millis = 0;
+unsigned long previous_millis = 0;
+
+const char* ssid = "CUBE";
+const char* password = "123456789";
 const char* mqtt_server = "test.mosquitto.org";
 const char* topicOut = "barrier_status/gate1";
 const char* subscribeTopic = "barrier_command/#";
@@ -48,8 +62,6 @@ int duration = 2000;
 
 int block=2;
 
-EasyButton button(BUTTON_PIN);
-
 // Generally, you should use "unsigned long" for variables that hold time
 // The value will quickly become too large for an int to store
 unsigned long previousMillis = 0;        // will store last time LED was updated
@@ -57,6 +69,116 @@ unsigned long previousMillis = 0;        // will store last time LED was updated
 // constants won't change:
 const long interval = 1000;
 
+BLEScan* pBLEScan;
+
+typedef struct BLE {
+  int minor;
+  int rss;
+  int counter;
+  unsigned long time;
+  bool flag_detect;
+}BLE_t;
+
+BLE_t b[NUMBEROFBEACON];
+
+double calculateDistance(double rssi);
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+    void onResult(BLEAdvertisedDevice advertisedDevice) {
+      String newcome = advertisedDevice.toString().c_str();
+      Serial.println(newcome);
+      String stringOne = newcome.substring(newcome.lastIndexOf(','));
+      String id = stringOne.substring(29,31);
+      if(id == FILTER_ID){
+          String major_hex = stringOne.substring(61,65);
+          String minor_hex = stringOne.substring(65,69);
+          int major = (int)strtol(major_hex.c_str(),NULL,16);
+          int minor = (int)strtol(minor_hex.c_str(),NULL,16);
+          double rssi = advertisedDevice.getRSSI()*-1.0;
+          double distance = calculateDistance(rssi);
+
+          if(distance <= PROXIMITY){
+            for(int i=0; i<NUMBEROFBEACON; i++){
+              if(minor == b[i].minor){
+                b[i].time = millis();
+                b[i].rss = rssi;
+                b[i].counter += 1;
+                Serial.print("Existing :"); Serial.print(b[i].minor); Serial.print("-"); Serial.print(b[i].counter); Serial.print("-"); Serial.println(b[i].time);
+                return;
+              }
+            }
+            for(int j=0; j<NUMBEROFBEACON; j++){
+              if(b[j].minor == NULL){
+                b[j].minor = minor;
+                b[j].time = millis();
+                b[j].rss = rssi;
+                b[j].counter += 1;
+                Serial.print("append success ->"); Serial.println(b[j].minor);
+                return;
+            }
+          }
+        }
+      }
+      
+      else{
+        return;
+      }
+    }
+};
+
+double calculateDistance(double rssi) {
+    float txPower = -59.0;
+    if (rssi == 0) {
+        return -1.0; // if we cannot determine distance, return -1.
+    }
+    double ratio = rssi * 1.0 / txPower;
+
+    if (ratio < 1.0) {
+        return pow(ratio, 10);
+    } else {
+        double accuracy = (0.89976) * pow(ratio, 7.7095) + 0.111;
+        return accuracy;
+    }
+}
+
+void check_beacon(){
+  if(current_millis - previous_millis >= UPDATE_MILLIS){
+    previous_millis = current_millis;
+    
+    for(int j=0; j<NUMBEROFBEACON; j++){
+     if(current_millis-b[j].time>BLE_TIMEOUT && b[j].minor!=NULL){
+        Serial.print(b[j].minor); Serial.print("-"); Serial.println("out");
+        b[j].minor = 0;
+        b[j].rss = 0;
+        b[j].time = 0;
+        b[j].counter = 0;
+        b[j].flag_detect = false;
+     }
+     else if( b[j].minor!=NULL){
+        Serial.print(b[j].minor); Serial.print(" inrange with rssi = "); Serial.println(b[j].rss);
+     }
+    }
+
+    for(int j=0; j<NUMBEROFBEACON; j++)
+    {
+      if(b[j].counter == DETECT_COUNTER && b[j].flag_detect == false){
+          b[j].flag_detect = true;
+          LED_ON(LED0);
+          delay(2000);
+          LED_OFF(LED0);
+      }
+    }
+  }
+}
+
+void ble_init(){
+  BLEDevice::init("");
+  pBLEScan = BLEDevice::getScan(); //create new scan
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setActiveScan(true); //active scan uses more power, but get results faster
+  pBLEScan->setInterval(100);
+  pBLEScan->setWindow(99);  // less or equal setInterval value
+}
 
 void buzzer(uint16_t t_on, uint16_t t_off, uint8_t count){
   for (uint8_t i = 0; i < count; i++)
@@ -106,11 +228,6 @@ String read_rfid(){
     }
   }
   return content;
-}
-
-// Callback.
-void onPressedForDuration() {
-    Serial.println("Button has been pressed for the given duration!");
 }
 
 void setup_wifi() {
@@ -220,20 +337,16 @@ void setup() {
   Serial.println(F("Scan PICC to see UID, SAK, type, and data blocks..."));
   
   servo1.attach(servoPin);
-  button.begin();
   
-  // Attach callback.
-  button.onPressedFor(duration, onPressedForDuration);
-  
+  ble_init();
   servo_close();
 }
 
 void loop() {
   // Reset the loop if no new card present on the sensor/reader. This saves the entire process when idle.
-  unsigned long currentMillis = millis();
-  if (currentMillis - previousMillis >= interval)
-  {
-    previousMillis = currentMillis; 
+  current_millis = millis();
+  if (current_millis - previousMillis >= interval){
+    previousMillis = current_millis; 
     
     byte readbackblock[18];
        
@@ -265,8 +378,15 @@ void loop() {
       }
     }
   }
-  button.read();
-
+  
+  BLEScanResults foundDevices = pBLEScan->start(scanTime, false);
+  Serial.print("Devices found: ");
+  Serial.println(foundDevices.getCount());
+  Serial.println("Scan done!");
+  pBLEScan->clearResults();
+  current_millis = millis();
+  check_beacon();
+  
   if(!client.loop()){
     reconnect();
   }
